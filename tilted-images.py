@@ -1,23 +1,38 @@
 #!/usr/bin/env python3
 """
-Schéma de coupes inclinées et empilées (style Fig 12 de Skibbe et al. 2023).
+Incline des coupes (NIfTI .nii/.nii.gz ou PNG/JPG) façon Fig 12 de Skibbe et al. 2023.
 
-Exemples :
-  # à partir d'un volume NIfTI 3D : coupes 40, 80 et 120 le long de l'axe 2
-  python coupes_inclinees.py volume.nii.gz --coupes 40 80 120 --axe 2 --mode horizontal
+UTILISATION SIMPLE :
+  1. Modifie les PARAMÈTRES juste en dessous (au moins DOSSIER_COUPES).
+  2. Lance :  python tilted-images.py
+  -> toutes les coupes du dossier sont inclinées et enregistrées dans DOSSIER_SORTIE.
 
-  # à partir de plusieurs coupes 2D NIfTI (ou PNG/JPG)
-  python coupes_inclinees.py coupe1.nii.gz coupe2.nii.gz coupe3.nii.gz --mode vertical
-
-  # empilées de haut en bas (comme le papier)
-  python coupes_inclinees.py c1.png c2.png c3.png --mode vertical --vides 2 --espacement "50 µm"
-
-  # empilées de gauche à droite
-  python coupes_inclinees.py c1.png c2.png c3.png --mode horizontal --vides 2
-
-Sortie : un SVG (à retoucher dans Inkscape) + un PNG 300 dpi.
+(Optionnel) Tu peux aussi donner des fichiers en ligne de commande :
+  python tilted-images.py coupe1.nii.gz coupe2.nii.gz --pile
 """
+
+# ============================ PARAMÈTRES ============================
+DOSSIER_COUPES = "~/Bureau/coupes"           # dossier contenant tes coupes
+DOSSIER_SORTIE = "~/Bureau/coupes_inclinees" # où enregistrer les résultats
+
+UNE_IMAGE_PAR_COUPE = True   # True : chaque coupe inclinée dans son propre fichier
+                             # False : toutes les coupes empilées dans un seul schéma
+SENS = "vertical"            # "vertical" (haut -> bas) ou "horizontal" (gauche -> droite)
+ANGLE = -40                  # inclinaison en degrés (essaie 40 pour l'autre côté)
+ECRASE = 0.3                 # 0.2 = très plat, 0.5 = peu écrasé
+CMAP = "gray"                # couleurs : "gray", "magma", "hot", "viridis"...
+ROT = 1                      # 0, 1, 2 ou 3 : tourne la coupe de 90° x N si elle est de travers
+
+# seulement pour le schéma empilé (UNE_IMAGE_PAR_COUPE = False)
+VIDES = 0                    # nb de coupes bleues vides entre deux coupes
+PAS = 0.38                   # distance entre les coupes
+COULEUR_VIDES = "#8fa9c9"
+ESPACEMENT = "50 µm"         # texte de l'accolade ("" pour ne rien afficher)
+# ====================================================================
+
 import argparse
+import os
+import glob
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mt
@@ -109,36 +124,11 @@ def deformer_image(img, t, px_par_unite=800):
     return np.asarray(out), [xmin, xmax, ymin, ymax]
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("images", nargs="+",
-                   help="coupes : .nii / .nii.gz (2D ou volume 3D) ou png/jpg")
-    p.add_argument("--coupes", type=int, nargs="+",
-                   help="indices des coupes à extraire d'un volume 3D")
-    p.add_argument("--axe", type=int, default=2, choices=[0, 1, 2],
-                   help="axe de coupe du volume (0=x, 1=y, 2=z)")
-    p.add_argument("--cmap", default="gray", help="colormap (gray, magma, hot...)")
-    p.add_argument("--rot", type=int, default=1,
-                   help="rotation de 90° x N pour remettre la coupe à l'endroit")
-    p.add_argument("--mode", choices=["vertical", "horizontal"], default="vertical")
-    p.add_argument("--vides", type=int, default=1,
-                   help="nb de coupes vides (colorées) entre deux images")
-    p.add_argument("--ecrase", type=float, default=0.3, help="écrasement (0.2-0.4)")
-    p.add_argument("--angle", type=float, default=-40, help="inclinaison en degrés")
-    p.add_argument("--pas", type=float, default=0.38, help="distance entre coupes")
-    p.add_argument("--couleur", default="#8fa9c9", help="couleur des coupes vides")
-    p.add_argument("--espacement", default="50 µm", help="texte de l'accolade")
-    p.add_argument("--titre", default="", help="titre au-dessus du schéma")
-    p.add_argument("--out", default="coupes_inclinees")
-    a = p.parse_args()
-
+def dessiner(imgs, a, sortie):
+    """Dessine les images inclinées (empilées si plusieurs) et enregistre."""
     fig, ax = plt.subplots(figsize=(6, 6))
     carre = np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
 
-    # construire la séquence : image, vides, image, vides, ...
-    imgs = []
-    for f in a.images:
-        imgs += charger(f, a.coupes, a.axe, a.cmap, a.rot)
     seq = []
     for i, im in enumerate(imgs):
         seq.append(im)
@@ -147,16 +137,12 @@ def main():
 
     positions = []
     for k, item in enumerate(seq):
-        if a.mode == "vertical":
-            dx, dy = 0, -k * a.pas            # descend
-        else:
-            dx, dy = k * a.pas, 0             # va vers la droite
+        dx, dy = (0, -k * a.pas) if a.mode == "vertical" else (k * a.pas, 0)
         t = transfo_coupe(a.mode, a.ecrase, a.angle, dx, dy)
-        z = len(seq) - k if a.mode == "vertical" else k   # ordre d'affichage
+        z = len(seq) - k if a.mode == "vertical" else k
         if item is None:
-            poly = Polygon(t.transform(carre), closed=True, facecolor=a.couleur,
-                           edgecolor="#4a6a90", lw=0.6, zorder=z)
-            ax.add_patch(poly)
+            ax.add_patch(Polygon(t.transform(carre), closed=True, facecolor=a.couleur,
+                                 edgecolor="#4a6a90", lw=0.6, zorder=z))
         else:
             warped, ext = deformer_image(item, t)
             ax.imshow(warped, extent=ext, origin="upper",
@@ -165,8 +151,8 @@ def main():
                                  edgecolor="#2f5f9e", lw=1.2, zorder=z))
         positions.append(t.transform(carre))
 
-    # accolade entre les deux premières coupes consécutives
-    if len(seq) > 1:
+    # accolade entre les deux premières coupes
+    if len(seq) > 1 and a.espacement:
         p0, p1 = positions[0], positions[1]
         if a.mode == "vertical":
             x = max(p0[:, 0].max(), p1[:, 0].max()) + 0.05
@@ -181,17 +167,64 @@ def main():
             ax.text((x0 + x1) / 2, y - 0.07, a.espacement, ha="center", va="top",
                     fontsize=13, family="serif", style="italic")
 
-    if a.titre:
-        ax.set_title(a.titre, family="serif", fontsize=14)
     ax.set_aspect("equal")
     pts = np.vstack(positions)
-    m = 0.25
-    ax.set_xlim(pts[:, 0].min() - m, pts[:, 0].max() + m)
-    ax.set_ylim(pts[:, 1].min() - m, pts[:, 1].max() + m)
+    m = 0.1
+    ax.set_xlim(pts[:, 0].min() - m, pts[:, 0].max() + m + 0.3 * (len(seq) > 1))
+    ax.set_ylim(pts[:, 1].min() - m - 0.2 * (len(seq) > 1), pts[:, 1].max() + m)
     ax.axis("off")
-    fig.savefig(a.out + ".svg", bbox_inches="tight")
-    fig.savefig(a.out + ".png", dpi=300, bbox_inches="tight")
-    print("Écrit :", a.out + ".svg", "et", a.out + ".png")
+    fig.savefig(sortie + ".svg", bbox_inches="tight", transparent=True)
+    fig.savefig(sortie + ".png", dpi=300, bbox_inches="tight", transparent=True)
+    plt.close(fig)
+    print("  ->", sortie + ".png  (+ .svg)")
+
+
+def nom_sans_ext(chemin):
+    n = os.path.basename(chemin)
+    for ext in (".nii.gz", ".nii", ".png", ".jpg", ".jpeg", ".tif", ".tiff"):
+        if n.lower().endswith(ext):
+            return n[: -len(ext)]
+    return n
+
+
+def main():
+    p = argparse.ArgumentParser(description="Incline des coupes (voir PARAMÈTRES en haut du fichier).")
+    p.add_argument("images", nargs="*", help="(optionnel) fichiers de coupes ; sinon DOSSIER_COUPES")
+    p.add_argument("--pile", action="store_true", help="empiler toutes les coupes dans un seul schéma")
+    p.add_argument("--coupes", type=int, nargs="+", help="indices à extraire si volume 3D")
+    p.add_argument("--axe", type=int, default=2, choices=[0, 1, 2])
+    a = p.parse_args()
+
+    # valeurs venant du bloc PARAMÈTRES
+    a.mode, a.angle, a.ecrase, a.cmap, a.rot = SENS, ANGLE, ECRASE, CMAP, ROT
+    a.vides, a.pas, a.couleur, a.espacement = VIDES, PAS, COULEUR_VIDES, ESPACEMENT
+
+    if a.images:
+        fichiers = a.images
+    else:
+        dossier = os.path.expanduser(DOSSIER_COUPES)
+        fichiers = []
+        for ext in ("*.nii.gz", "*.nii", "*.png", "*.jpg", "*.jpeg", "*.tif", "*.tiff"):
+            fichiers += glob.glob(os.path.join(dossier, ext))
+        fichiers = sorted(set(fichiers))
+        if not fichiers:
+            raise SystemExit(f"Aucune coupe trouvée dans {dossier} — vérifie DOSSIER_COUPES.")
+
+    sortie = os.path.expanduser(DOSSIER_SORTIE)
+    os.makedirs(sortie, exist_ok=True)
+    print(f"{len(fichiers)} fichier(s) trouvé(s). Résultats dans : {sortie}")
+
+    if UNE_IMAGE_PAR_COUPE and not a.pile:
+        for f in fichiers:
+            for j, im in enumerate(charger(f, a.coupes, a.axe, a.cmap, a.rot)):
+                suffixe = f"_{j}" if j else ""
+                dessiner([im], a, os.path.join(sortie, "incline_" + nom_sans_ext(f) + suffixe))
+    else:
+        imgs = []
+        for f in fichiers:
+            imgs += charger(f, a.coupes, a.axe, a.cmap, a.rot)
+        dessiner(imgs, a, os.path.join(sortie, "coupes_empilees"))
+    print("Terminé.")
 
 
 if __name__ == "__main__":
