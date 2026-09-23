@@ -3,6 +3,12 @@
 Schéma de coupes inclinées et empilées (style Fig 12 de Skibbe et al. 2023).
 
 Exemples :
+  # à partir d'un volume NIfTI 3D : coupes 40, 80 et 120 le long de l'axe 2
+  python coupes_inclinees.py volume.nii.gz --coupes 40 80 120 --axe 2 --mode horizontal
+
+  # à partir de plusieurs coupes 2D NIfTI (ou PNG/JPG)
+  python coupes_inclinees.py coupe1.nii.gz coupe2.nii.gz coupe3.nii.gz --mode vertical
+
   # empilées de haut en bas (comme le papier)
   python coupes_inclinees.py c1.png c2.png c3.png --mode vertical --vides 2 --espacement "50 µm"
 
@@ -29,10 +35,58 @@ def transfo_coupe(mode, ecrase, angle, dx, dy):
     return t.translate(dx, dy)
 
 
-def deformer_image(chemin, t, px_par_unite=800):
+def normaliser(a, cmap):
+    """Tableau 2D ou RGB -> image PIL RGBA (contraste 1-99 percentiles)."""
+    a = np.asarray(a, dtype=float)
+    if a.ndim == 2:
+        lo, hi = np.percentile(a[np.isfinite(a)], [1, 99])
+        a = np.clip((a - lo) / (hi - lo + 1e-12), 0, 1)
+        rgba = plt.get_cmap(cmap)(a)
+    else:  # RGB
+        a = a[..., :3]
+        a = a / (a.max() + 1e-12)
+        rgba = np.dstack([a, np.ones(a.shape[:2])])
+    return Image.fromarray((rgba * 255).astype(np.uint8), "RGBA")
+
+
+def carre_noir(img):
+    """Complète l'image en carré (fond noir) pour ne pas la déformer."""
+    w, h = img.size
+    c = max(w, h)
+    fond = Image.new("RGBA", (c, c), (0, 0, 0, 255))
+    fond.paste(img, ((c - w) // 2, (c - h) // 2))
+    return fond
+
+
+def charger(chemin, coupes, axe, cmap, rot):
+    """Renvoie une liste d'images PIL à partir d'un PNG/JPG ou d'un NIfTI."""
+    if not chemin.endswith((".nii", ".nii.gz")):
+        return [carre_noir(Image.open(chemin).convert("RGBA"))]
+
+    import nibabel as nib
+    data = np.asanyarray(nib.load(chemin).dataobj)
+    if data.dtype.names:                       # NIfTI RGB24 (champs R, G, B)
+        data = np.stack([data[c] for c in data.dtype.names[:3]], axis=-1)
+    data = np.squeeze(data)
+    rgb = data.shape[-1] in (3, 4) and data.ndim >= 3
+
+    if data.ndim == 2 or (rgb and data.ndim == 3):
+        tranches = [data]                      # déjà une coupe 2D
+    else:                                      # volume 3D
+        n = data.shape[axe]
+        idx = coupes if coupes else [n // 4, n // 2, 3 * n // 4]
+        tranches = [np.take(data, i, axis=axe) for i in idx]
+
+    images = []
+    for t in tranches:
+        t = np.rot90(t, k=rot)                 # NIfTI (x, y) -> affichage
+        images.append(carre_noir(normaliser(t, cmap)))
+    return images
+
+
+def deformer_image(img, t, px_par_unite=800):
     """Applique la transfo affine t à l'image (fond transparent).
     Renvoie l'image déformée et son extent [xmin, xmax, ymin, ymax]."""
-    img = Image.open(chemin).convert("RGBA")
     W, H = img.size
     coins = t.transform(np.array([[0, 0], [1, 0], [1, 1], [0, 1]]))
     xmin, ymin = coins.min(0)
@@ -57,7 +111,15 @@ def deformer_image(chemin, t, px_par_unite=800):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("images", nargs="+", help="images des coupes (png/jpg/tif)")
+    p.add_argument("images", nargs="+",
+                   help="coupes : .nii / .nii.gz (2D ou volume 3D) ou png/jpg")
+    p.add_argument("--coupes", type=int, nargs="+",
+                   help="indices des coupes à extraire d'un volume 3D")
+    p.add_argument("--axe", type=int, default=2, choices=[0, 1, 2],
+                   help="axe de coupe du volume (0=x, 1=y, 2=z)")
+    p.add_argument("--cmap", default="gray", help="colormap (gray, magma, hot...)")
+    p.add_argument("--rot", type=int, default=1,
+                   help="rotation de 90° x N pour remettre la coupe à l'endroit")
     p.add_argument("--mode", choices=["vertical", "horizontal"], default="vertical")
     p.add_argument("--vides", type=int, default=1,
                    help="nb de coupes vides (colorées) entre deux images")
@@ -74,10 +136,13 @@ def main():
     carre = np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
 
     # construire la séquence : image, vides, image, vides, ...
+    imgs = []
+    for f in a.images:
+        imgs += charger(f, a.coupes, a.axe, a.cmap, a.rot)
     seq = []
-    for i, f in enumerate(a.images):
-        seq.append(f)
-        if i < len(a.images) - 1:
+    for i, im in enumerate(imgs):
+        seq.append(im)
+        if i < len(imgs) - 1:
             seq += [None] * a.vides
 
     positions = []
